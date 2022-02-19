@@ -4779,6 +4779,7 @@ def sig_trace_handler(sig_no, stack):  # pragma: no cover
 
 
 def main():  # pragma: no cover
+    print('EXPERIMENTAL VERSION', file=sys.stderr)
     # Make sure stdout and stderr have errors='replace' to avoid unicode
     # issues when print()-ing unicode file names
     sys.stdout = ErrorIgnoringTextIOWrapper(sys.stdout.buffer, sys.stdout.encoding, 'replace', line_buffering=True)
