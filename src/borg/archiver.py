@@ -14,6 +14,7 @@ try:
     import itertools
     import json
     import logging
+    import math
     import os
     import re
     import shlex
@@ -1219,41 +1220,83 @@ class Archiver:
             hardlink_masters = {}
             output = []
 
-            for item1, item2 in zip_longest(
-                    archive1.iter_items(lambda item: matcher.match(item.path)),
-                    archive2.iter_items(lambda item: matcher.match(item.path)),
-            ):
-                if item1 and item2 and item1.path == item2.path:
-                    compare_or_defer(item1, item2)
-                    continue
-                if item1:
-                    matching_orphan = orphans_archive2.pop(item1.path, None)
-                    if matching_orphan:
-                        compare_or_defer(item1, matching_orphan)
-                    else:
-                        orphans_archive1[item1.path] = item1
-                if item2:
-                    matching_orphan = orphans_archive1.pop(item2.path, None)
-                    if matching_orphan:
-                        compare_or_defer(matching_orphan, item2)
-                    else:
-                        orphans_archive2[item2.path] = item2
-            # At this point orphans_* contain items that had no matching partner in the other archive
+            if 'ORPHAN_LIMIT' in os.environ:
+                ORPHAN_LIMIT = int(os.environ['ORPHAN_LIMIT'])
+            else:
+                ORPHAN_LIMIT = math.inf
+
+            def archive_iter(archive):
+                return archive.iter_items(lambda item: matcher.match(item.path))
+
             deleted_item = Item(
                 deleted=True,
                 chunks=[],
                 mode=0,
             )
-            for added in orphans_archive2.values():
-                path = added.path
-                deleted_item.path = path
-                update_hardlink_masters(deleted_item, added)
-                compare_items(output, path, deleted_item, added, hardlink_masters, deleted=True)
-            for deleted in orphans_archive1.values():
-                path = deleted.path
-                deleted_item.path = path
-                update_hardlink_masters(deleted, deleted_item)
-                compare_items(output, path, deleted, deleted_item, hardlink_masters, deleted=True)
+
+            def vacate_orphans1(do_match=True):
+                nonlocal orphans_archive1
+                print(f'vacating orphans1 ({len(orphans_archive1)} items)', file=sys.stderr)
+
+                if do_match:
+                    for item2 in archive_iter(archive2):    # FIXME: skip seen items
+                        matching_orphan = orphans_archive1.pop(item2.path, None)
+                        if matching_orphan:
+                            compare_or_defer(matching_orphan, item2)
+
+                for deleted in orphans_archive1.values():
+                    path = deleted.path
+                    deleted_item.path = path
+                    update_hardlink_masters(deleted, deleted_item)
+                    compare_items(output, path, deleted, deleted_item, hardlink_masters, deleted=True)
+
+                orphans_archive1 = collections.OrderedDict()
+
+            def vacate_orphans2(do_match=True):
+                nonlocal orphans_archive2
+                print(f'vacating orphans2 ({len(orphans_archive2)} items)', file=sys.stderr)
+
+                if do_match:
+                    for item1 in archive_iter(archive1):
+                        matching_orphan = orphans_archive2.pop(item1.path, None)
+                        if matching_orphan:
+                            compare_or_defer(item1, matching_orphan)
+
+                for added in orphans_archive2.values():
+                    path = added.path
+                    deleted_item.path = path
+                    update_hardlink_masters(deleted_item, added)
+                    compare_items(output, path, deleted_item, added, hardlink_masters, deleted=True)
+
+                orphans_archive2 = collections.OrderedDict()
+
+            for item1, item2 in zip_longest(archive_iter(archive1), archive_iter(archive2)):
+                if item1 and item2 and item1.path == item2.path:
+                    compare_or_defer(item1, item2)
+                else:
+                    if item1:
+                        matching_orphan = orphans_archive2.pop(item1.path, None)
+                        if matching_orphan:
+                            compare_or_defer(item1, matching_orphan)
+                        else:
+                            orphans_archive1[item1.path] = item1
+                    if item2:
+                        matching_orphan = orphans_archive1.pop(item2.path, None)
+                        if matching_orphan:
+                            compare_or_defer(matching_orphan, item2)
+                        else:
+                            orphans_archive2[item2.path] = item2
+
+                if len(orphans_archive1) >= ORPHAN_LIMIT:
+                    vacate_orphans1(do_match=True)
+                if len(orphans_archive2) >= ORPHAN_LIMIT:
+                    vacate_orphans2(do_match=True)
+
+            # At this point orphans_* contain items that had no matching partner in the other archive
+
+            vacate_orphans1(do_match=False)
+            vacate_orphans2(do_match=False)
+
             for item1, item2 in deferred:
                 assert hardlink_master_seen(item1)
                 assert hardlink_master_seen(item2)
